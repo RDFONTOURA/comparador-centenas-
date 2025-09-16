@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Comparador Cruz do Dia - Automático</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;background:#0b1220;color:#e6eef6;margin:0;padding:20px}
+    .wrap{max-width:1100px;margin:0 auto}
+    h1{color:#7dd3fc;text-align:center}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;margin-bottom:16px}
+    input{padding:8px;border-radius:8px;border:none;width:120px;text-align:center}
+    button{padding:8px 12px;border-radius:8px;border:none;background:#0487d0;color:white;cursor:pointer}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .card{background:rgba(255,255,255,0.03);padding:12px;border-radius:10px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border:1px solid rgba(255,255,255,0.06);text-align:left;font-size:13px}
+    th{background:rgba(255,255,255,0.04)}
+    .small{font-size:13px;color:#bcd}
+    .badge{display:inline-block;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,0.04);margin:4px;font-weight:700}
+    .hit{background:linear-gradient(90deg,#ffe58a,#ffd666);color:#000}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Comparador Cruz do Dia (automático)</h1>
+
+    <div class="controls">
+      <label class="small">Dia:
+        <input id="dayInput" type="number" min="1" max="31">
+      </label>
+      <button id="genBtn">Gerar Cruz</button>
+      <button id="refreshBtn">Recarregar resultados.json</button>
+      <div id="status" class="small"></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Número Final</h3>
+        <div id="numeroFinal" class="badge"></div>
+        <div class="small">Dígitos:</div>
+        <div id="digits"></div>
+      </div>
+
+      <div class="card">
+        <h3>Centenas geradas (permutações)</h3>
+        <div id="centenas" style="display:flex;flex-wrap:wrap"></div>
+      </div>
+
+      <div class="card" style="grid-column:1 / -1;">
+        <h3>Relatório por centena (ordenado por frequência)</h3>
+        <table id="reportTable">
+          <thead>
+            <tr><th>Centena</th><th>Qtd</th><th>Ocorrências (data hora → número completo)</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card" style="grid-column:1 / -1;">
+        <h3>Resumo por sorteio (onde houve pelo menos 1 match)</h3>
+        <table id="drawTable">
+          <thead><tr><th>Data</th><th>Horário</th><th>Números</th><th>Matches</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+let resultados = []; // carregados de resultados.json
+
+async function carregarResultados() {
+  try {
+    const resp = await fetch("resultados.json", {cache: "no-store"});
+    resultados = await resp.json();
+    document.getElementById("status").textContent = `Resultados carregados: ${resultados.length} registros.`;
+    console.log("resultados.json =>", resultados);
+  } catch (err) {
+    document.getElementById("status").textContent = "Erro ao carregar resultados.json (veja console).";
+    console.error(err);
+    resultados = [];
+  }
+}
+
+// gera cruz (4 dígitos) conforme regra: dia +3 sucessivo, pega unidade
+function gerarCruz(dia) {
+  let vals = [];
+  let atual = Number(dia) || new Date().getDate();
+  for (let i=0;i<4;i++) {
+    atual += 3;
+    vals.push(atual % 10);
+  }
+  const numeroFinal = vals.join("");
+  return {numeroFinal, digits: vals.map(String)};
+}
+
+// gera todas permutações de 3 dígitos (i!=j!=k)
+function gerarCentenasFromDigits(digits) {
+  const set = new Set();
+  for (let i=0;i<digits.length;i++){
+    for (let j=0;j<digits.length;j++){
+      for (let k=0;k<digits.length;k++){
+        if (i!==j && j!==k && i!==k) {
+          set.add(""+digits[i]+digits[j]+digits[k]);
+        }
+      }
+    }
+  }
+  return Array.from(set).sort();
+}
+
+function normalizeDraws(raw) {
+  // aceita vários formatos; retorna lista de {data, horario, numeros:[strings 3/4 dígitos]}
+  if (!Array.isArray(raw)) return [];
+  return raw.map(r => {
+    const numeros = (r.numeros || r.numbers || (r.numero? [r.numero]: []) || (r.centena? [r.centena] : []))
+      .map(n => String(n).trim())
+      .filter(Boolean);
+    return {
+      data: r.data || r.date || "",
+      horario: r.horario || r.hora || r.time || "",
+      numeros
+    };
+  });
+}
+
+function comparar(centenasList, draws) {
+  const stats = {};
+  centenasList.forEach(c => stats[c] = {centena:c, vezes:0, ocorrencias: []});
+
+  const drawMatches = []; // por sorteio
+
+  draws.forEach(d => {
+    const matchedInDraw = [];
+    (d.numeros || []).forEach(num => {
+      // num pode ser "4703" (4 dígitos) ou "470" (3 dígitos)
+      const n = String(num).padStart(3,"0");
+      const cent = n.slice(-3); // pega último 3 dígitos
+      if (centenasList.includes(cent)) {
+        stats[cent].vezes += 1;
+        stats[cent].ocorrencias.push({data:d.data, horario:d.horario, numero:num});
+        if (!matchedInDraw.includes(cent)) matchedInDraw.push(cent);
+      }
+    });
+    if (matchedInDraw.length) {
+      drawMatches.push({data:d.data, horario:d.horario, numeros: d.numeros.join(", "), matches: matchedInDraw});
+    }
+  });
+
+  const sorted = Object.values(stats).sort((a,b)=>b.vezes - a.vezes);
+  return {stats:sorted, drawMatches};
+}
+
+function renderCentroasList(list) {
+  const el = document.getElementById("centenas");
+  el.innerHTML = "";
+  list.forEach(c => {
+    const d = document.createElement("div");
+    d.className = "badge";
+    d.textContent = c;
+    el.appendChild(d);
+  });
+}
+
+function renderReports(result) {
+  const tbody = document.querySelector("#reportTable tbody");
+  tbody.innerHTML = "";
+  result.stats.forEach(s => {
+    const tr = document.createElement("tr");
+    const ocorrencias = s.ocorrencias.map(o => `${o.data} ${o.horario} → ${o.numero}`).join(" ; ");
+    tr.innerHTML = `<td>${s.centena}</td><td>${s.vezes}</td><td>${ocorrencias || "-"}</td>`;
+    if (s.vezes > 0) tr.querySelector("td").className = "hit";
+    tbody.appendChild(tr);
+  });
+
+  const drawTbody = document.querySelector("#drawTable tbody");
+  drawTbody.innerHTML = "";
+  result.drawMatches.forEach(d => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${d.data}</td><td>${d.horario}</td><td>${d.numeros}</td><td>${d.matches.join(", ")}</td>`;
+    drawTbody.appendChild(tr);
+  });
+}
+
+// ligar controles
+document.getElementById("genBtn").addEventListener("click", ()=>{
+  const dia = Number(document.getElementById("dayInput").value) || new Date().getDate();
+  const cruz = gerarCruz(dia);
+  document.getElementById("numeroFinal").textContent = cruz.numeroFinal;
+  document.getElementById("digits").textContent = cruz.digits.join(", ");
+
+  const centenas = gerarCentenasFromDigits(cruz.digits);
+  renderCentroasList(centenas);
+
+  const normalized = normalizeDraws(resultados);
+  const res = comparar(centenas, normalized);
+  renderReports(res);
+});
+
+document.getElementById("refreshBtn").addEventListener("click", async ()=>{
+  await carregarResultados();
+  document.getElementById("status").textContent += " (recarregado)";
+});
+
+// Auto-set dia atual
+document.getElementById("dayInput").value = new Date().getDate();
+
+// carregar resultados inicial
+carregarResultados();
+</script>
+</body>
+</html>
